@@ -30,3 +30,6 @@ Desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# Export builds — distributed via GitHub Releases
+/build/
