@@ -1,0 +1,32 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# Godot Mono/C# build artifacts
+.mono/
+data_*/
+mono_crash.*.json
+
+# Export credentials — Android keystore and other signing secrets Godot
+# stores under .godot/, kept here too in case that path ever changes
+export_credentials.cfg
+*.keystore
+*.jks
+*.p12
+*.mobileprovision
+
+# Secrets / local env files
+.env
+.env.*
+*.pem
+*.key
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp

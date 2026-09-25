@@ -1,0 +1,894 @@
+extends CharacterBody2D
+
+## After arriving, E is dead for this long. Without it the arrival mouth
+## registers you instantly and the next tap bounces you straight back.
+const TUNNEL_COOLDOWN := 1.0
+
+## Tunnel trips per match. The cooldown alone only slows spamming down; a hard
+## budget is what makes reaching a mouth a decision rather than a free reset
+## button you mash every time the Sili gets close.
+## Greyed-out heart. Kept as a constant so the player HUD and the team panel
+## can't drift apart.
+const HEART_SPENT_COLOR := Color(0.25, 0.25, 0.25, 0.5)
+
+## Sprite tint for a Tubig still burning or dead when the final whistle goes -
+## the buzzer doesn't rescue anyone, so whoever's still down should read as out
+## of the match rather than looking identical to someone who made it.
+const DOWNED_TINT := Color(0.4, 0.4, 0.4)
+
+## Sprite tint the instant a Tubig actually dies. Distinct from DOWNED_TINT
+## (plain grey, only applied at the final whistle): a greyish-blue reads as
+## "gone" at a glance and, critically, as visually DIFFERENT from a burning
+## teammate - burning is still rescuable, dead is not, and the two states
+## should never look alike mid-match.
+const DEAD_TINT := Color(0.42, 0.5, 0.6)
+
+const TUNNEL_USES_MAX := 3
+
+## Hard ceiling on tunnel charges however many fountain rolls land on you. Four
+## drinks exist in a round (one per Sili speed stage) and a lucky run of +3s
+## would otherwise hand one player twelve free map-crossings, which stops being
+## a decision and starts being an exploit - and "balanced mechanics, no unfair
+## advantage" is its own judging line.
+const TUNNEL_USES_CEILING := 6
+
+## What a fountain STAMINA roll is worth: sprint costs a third less and recovers
+## half again as fast, for the duration the fountain hands over.
+const STAMINA_BUFF_DRAIN_SCALE := 0.65
+const STAMINA_BUFF_REGEN_SCALE := 1.5
+
+const WALK_SPEED = 100.0
+const RUN_SPEED = 180.0
+const FRICTION = 1200.0
+
+## --- Stamina System ---
+@export var MAX_STAMINA: float = 100.0
+@export var STAMINA_DRAIN_RATE: float = 25.0
+## Slowed from 20.0 - see sili.gd's identical change. Both roles share the same
+## stamina model by design, so a Tubig and a Sili should feel the same cost
+## for spamming sprint, not just the Sili.
+@export var STAMINA_REGEN_RATE: float = 12.0
+@export var EXHAUSTION_DURATION: float = 2.0
+
+## --- Rescue System ---
+## Hearts are LIVES, not rescue charges. You lose one when the Sili tags you,
+## and you never get it back - not by being rescued, and not by anything else.
+## Rescuing costs the rescuer nothing; its only job is to unfreeze the person
+## who was tagged before their burn times out.
+##
+## The count itself now lives on HeatStatus, which the server owns - see the
+## comment on HeatStatus.lives_left. This script only draws it.
+@export var RESCUE_CHANNEL_TIME: float = 6.0  # seconds, per doc's 5-8s range
+
+## --- Stealth ---
+@export var CONCEAL_SETTLE_TIME: float = 0.35  # how long you must hold still inside a hiding spot
+@export var CONCEALED_SPRITE_ALPHA: float = 0.55  # local-only feedback, not real invisibility
+## How often the name tag re-tests canopy cover. Same reasoning and value as
+## SIGHTING_INTERVAL below - cover changes at walking pace, so asking every
+## frame would walk every canopy on the map sixty times a second for nothing.
+@export var NAME_CHECK_INTERVAL: float = 0.15
+
+## --- Sili spotting ---
+@export var SIGHTING_INTERVAL: float = 0.15  # how often we re-check if the Sili is on screen
+@export var SIGHTING_MARGIN: float = 0.08    # ignore the outer 8% of the screen edge
+
+signal stamina_changed(current_stamina: float, max_stamina: float)
+signal exhausted
+signal recovered_from_exhaustion
+signal rescue_progress(progress: float)  # 0.0 - 1.0, for a channel bar
+signal concealment_changed(is_concealed: bool)
+
+var stamina: float = MAX_STAMINA
+var is_exhausted: bool = false
+var _exhaustion_timer: float = 0.0
+var last_direction: String = "s"
+
+## Replicated (see tubig.tscn's MPSync) because the mini-map has to hide this
+## player's dot on EVERY peer's screen, not just their own. Same property-with-
+## setter trick as lives_left: MultiplayerSynchronizer assigns it directly on
+## remote peers, and routing through the setter keeps concealment_changed firing
+## everywhere instead of only where the value was first computed.
+var is_concealed: bool = false:
+	set(value):
+		if value == is_concealed:
+			return
+		is_concealed = value
+		concealment_changed.emit(value)
+
+var _rescue_target: Node2D = null
+var _rescue_timer: float = 0.0
+var _is_channeling: bool = false
+var _progress_broadcast_accum: float = 0.0
+var _conceal_timer: float = 0.0
+var _sighting_accum: float = 0.0
+var _last_reported_sighting: bool = false
+## Ticked down by _update_sili_sighting. While positive, this Tubig reports
+## seeing the Sili regardless of what the camera actually shows - see
+## trigger_sili_reveal(), called by reveal_spot.gd. A "tactical glimpse": it
+## feeds the SAME team-wide sighting flag a real camera sighting would, so it
+## shows and clears exactly like one, but it does not require the Sili to
+## ever be on this player's screen.
+var _reveal_override_remaining: float = 0.0
+var _hidden_label: Label = null
+
+@onready var animated_sprite: AnimatedSprite2D = $AnimatedSprite2D
+@onready var ui_layer: CanvasLayer = $ui
+@onready var stamina_bar: ProgressBar = $ui/StaminaBar
+@onready var boost_label: Label = $ui/BoostLabel
+@onready var hearts: Array = [$ui/HeartsRow/Heart1, $ui/HeartsRow/Heart2, $ui/HeartsRow/Heart3]
+@onready var heat_status: HeatStatus = $HeatStatus
+@onready var interaction_area: Area2D = $InteractionArea
+
+## Set by whichever Tunnel mouth we're standing in - see tunnel.gd. Null means
+## there's nothing to travel through.
+var _nearby_tunnel: Tunnel = null
+var _tunnel_cooldown: float = 0.0
+var _tunnel_prompt: Label = null
+var _rescue_prompt: Label = null
+## Tracked per Tubig and spent locally, like stamina. Players are rebuilt when
+## the arena reloads, so a replay hands everyone a fresh set.
+var tunnel_uses_left: int = TUNNEL_USES_MAX
+## Set by whichever Fountain we're standing in - see fountain.gd. Exactly the
+## same push-from-the-prop pattern as _nearby_tunnel, and for the same reason:
+## Sili has no set_nearby_fountain(), so the Sili is never even offered it.
+var _nearby_fountain: Fountain = null
+var _fountain_prompt: Label = null
+var _stamina_buff_remaining: float = 0.0
+@onready var rescue_indicator: ProgressBar = $RescueIndicator
+@onready var rescue_indicator_label: Label = $RescueIndicator/RescueLabel
+@onready var name_label: Label = $NameLabel
+
+
+func _ready() -> void:
+	if multiplayer.has_multiplayer_peer() and not is_multiplayer_authority():
+		ui_layer.visible = false
+
+	# World-space, not ui_layer - every viewer needs to read this, not just the
+	# locally-controlled player. Left visible even while concealed: concealment
+	# only drops you off the team minimap (see minimap.gd) - "you are not
+	# invisible in the world, the Sili can still walk into you and tag you" -
+	# so a nameless-but-fully-visible sprite would be a bigger tell that
+	# somebody is hiding than just leaving the name where it always is.
+	name_label.text = _own_name()
+
+	stamina_bar.max_value = MAX_STAMINA
+	stamina_bar.value = stamina
+	stamina_changed.connect(_on_stamina_changed)
+
+	heat_status.state_changed.connect(_on_heat_state_changed)
+	MatchManager.match_ended.connect(_on_match_ended)
+
+	heat_status.lives_changed.connect(_on_lives_changed)
+
+	_update_hearts(heat_status.lives_left)
+
+	rescue_indicator.visible = false
+
+	_build_hidden_label()
+	concealment_changed.connect(_on_concealment_changed)
+
+	add_to_group("player")  # keeps compatibility with the canopy fade (over.gd)
+	add_to_group("tubig")
+
+	# Footsteps run for every character on screen, not just ours - hearing
+	# someone sprint past on gravel is half the game. Only the local player
+	# gets the ocean ambience, though.
+	var surface_audio := SurfaceAudio.new()
+	surface_audio.name = "SurfaceAudio"
+	surface_audio.setup(
+		self,
+		not multiplayer.has_multiplayer_peer() or is_multiplayer_authority(),
+		(WALK_SPEED + RUN_SPEED) * 0.5)
+	add_child(surface_audio)
+
+
+## Sprint intent comes from the `run` action only - see sili.gd's identical
+## handler for the long version. Short version: Input.is_action_pressed keeps
+## the physical key latched across an alt-tab, so releasing focus without this
+## left a player sprinting (and draining stamina) with nothing held down the
+## moment they clicked back into the game.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT \
+			or what == NOTIFICATION_WM_WINDOW_FOCUS_OUT:
+		if Input.is_action_pressed("run"):
+			Input.action_release("run")
+
+
+func _build_hidden_label() -> void:
+	_hidden_label = Label.new()
+	_hidden_label.text = "HIDDEN"
+	_hidden_label.visible = false
+	_hidden_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_hidden_label.offset_left = -60.0
+	_hidden_label.offset_top = -130.0
+	_hidden_label.offset_right = 60.0
+	_hidden_label.offset_bottom = -105.0
+	_hidden_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hidden_label.add_theme_font_size_override("font_size", 16)
+	_hidden_label.add_theme_color_override("font_color", Color(0.55, 0.95, 0.7))
+	ui_layer.add_child(_hidden_label)
+
+
+func _on_concealment_changed(concealed: bool) -> void:
+	if not multiplayer.has_multiplayer_peer() or is_multiplayer_authority():
+		animated_sprite.modulate.a = CONCEALED_SPRITE_ALPHA if concealed else 1.0
+		if _hidden_label:
+			_hidden_label.visible = concealed
+
+
+## Runs on EVERY peer, for EVERY Tubig - unlike _physics_process below, which
+## only the authority runs for its own body. Whether a canopy hides a name tag
+## depends on where THIS SCREEN's own player is standing relative to whoever
+## the tag belongs to, so each viewer has to judge it independently rather
+## than the owner deciding it once for everybody.
+##
+## Canopy cover only - unlike is_concealed's hiding spots, which leave the name
+## up on purpose (see the _ready() comment on name_label). A palm is a
+## different promise: it already hides you from the map, so it should hide you
+## from a floating name the same way, or the label gives away exactly what the
+## canopy just hid.
+var _name_check_accum: float = 0.0
+
+func _process(delta: float) -> void:
+	_name_check_accum += delta
+	if _name_check_accum < NAME_CHECK_INTERVAL:
+		return
+	_name_check_accum = 0.0
+	name_label.visible = not CanopyFade.hidden_from_local(get_tree(), global_position)
+
+	# Pruning otherwise only happens when a report ARRIVES. A lone rescuer who
+	# gets tagged or drops mid-channel never sends their final 0.0, and with no
+	# further report coming the bar would sit frozen at their last value.
+	if not _rescuers.is_empty():
+		_refresh_rescue_indicator()
+
+
+func _physics_process(delta: float) -> void:
+	if multiplayer.has_multiplayer_peer() and not is_multiplayer_authority():
+		return
+
+	if MatchManager.inputs_locked():
+		velocity = Vector2.ZERO
+		animated_sprite.play("idle_" + last_direction)
+		move_and_slide()
+		return
+
+	_update_sili_sighting(delta)
+
+	if heat_status.is_incapacitated():
+		velocity = velocity.move_toward(Vector2.ZERO, FRICTION * delta)
+		_play_heat_animation()
+		move_and_slide()
+		_cancel_rescue_channel()
+		is_concealed = false
+		_conceal_timer = 0.0
+		return
+
+	var input_vector := Input.get_vector("left", "right", "up", "down")
+	var wants_to_run := Input.is_action_pressed("run") or Input.is_key_pressed(KEY_SHIFT)
+	var wants_to_rescue := Input.is_action_pressed("rescue")
+
+	_tunnel_cooldown = maxf(0.0, _tunnel_cooldown - delta)
+	_stamina_buff_remaining = maxf(0.0, _stamina_buff_remaining - delta)
+	if Input.is_action_just_pressed("rescue"):
+		_try_interact()
+	_update_tunnel_prompt()
+	_update_fountain_prompt()
+	_update_rescue_prompt()
+
+	var is_moving := input_vector != Vector2.ZERO
+
+	_update_concealment(delta, is_moving)
+
+	if wants_to_rescue and not is_moving:
+		_handle_rescue_channel(delta)
+	else:
+		_cancel_rescue_channel()
+
+	var is_running := wants_to_run and is_moving and not is_exhausted and stamina > 0.0 and not _is_channeling
+
+	# Local-only feedback (ui_layer is hidden for every peer but the one
+	# driving this body), so there's nothing to replicate here.
+	boost_label.visible = is_running
+
+	_update_stamina(delta, is_running)
+
+	if _is_channeling:
+		velocity = Vector2.ZERO
+		move_and_slide()
+		return
+
+	var current_speed := RUN_SPEED if is_running else WALK_SPEED
+
+	if is_moving:
+		velocity = input_vector * current_speed
+		var suffix = get_direction_suffix(input_vector)
+		last_direction = suffix
+		animated_sprite.flip_h = (input_vector.x < 0)
+		var anim_prefix := "run_" if is_running else "walk_"
+		animated_sprite.play(anim_prefix + suffix)
+	else:
+		velocity = velocity.move_toward(Vector2.ZERO, FRICTION * delta)
+		animated_sprite.play("idle_" + last_direction)
+
+	move_and_slide()
+
+
+# --- Rescue ("Tubig!") ---
+
+## rpc() on a node aborts with an error when there's no connected peer, and this
+## fires every 0.1s for the whole channel - so an offline or single-instance test
+## used to error out the moment you held E next to a burning ally. Same guard
+## _complete_rescue already used, just applied everywhere the RPC is sent.
+func _send_rescue_progress(target: Node, progress: float, seconds_left: float) -> void:
+	if target == null or not is_instance_valid(target):
+		return
+	if multiplayer.has_multiplayer_peer() and multiplayer.get_peers().size() > 0:
+		target.rpc("show_rescue_progress", progress, seconds_left)
+	else:
+		target.show_rescue_progress(progress, seconds_left)
+
+
+func _handle_rescue_channel(delta: float) -> void:
+	# No cost and no charge count: a rescue only unfreezes the target, so the
+	# rescuer's own hearts are irrelevant to whether they can attempt one.
+	if not MatchManager.rescues_available():
+		_cancel_rescue_channel()
+		return
+
+	var target := _find_burning_ally()
+	if target == null:
+		_cancel_rescue_channel()
+		return
+
+	if target != _rescue_target:
+		_rescue_target = target
+		_rescue_timer = 0.0
+		_progress_broadcast_accum = 0.0
+		AudioManager.play_sfx_at("rescue_start", global_position)
+
+	_is_channeling = true
+	_rescue_timer += delta
+	var progress: float = _rescue_timer / RESCUE_CHANNEL_TIME
+	rescue_progress.emit(progress)
+
+	_progress_broadcast_accum += delta
+	if _progress_broadcast_accum >= 0.1 or progress >= 1.0:
+		_progress_broadcast_accum = 0.0
+		_send_rescue_progress(target, progress, RESCUE_CHANNEL_TIME - _rescue_timer)
+
+	if _rescue_timer >= RESCUE_CHANNEL_TIME:
+		_complete_rescue()
+
+
+func _complete_rescue() -> void:
+	if _rescue_target and is_instance_valid(_rescue_target):
+		var target_heat: HeatStatus = _rescue_target.get_node_or_null("HeatStatus")
+		if target_heat:
+			if multiplayer.has_multiplayer_peer():
+				target_heat.rpc_id(1, "request_cool_fully")
+			else:
+				target_heat.cool_fully()
+		_send_rescue_progress(_rescue_target, 0.0, 0.0)
+
+	# The "X rescued Y" line is written by the server in HeatStatus, once the
+	# rescue has actually been validated and has actually freed somebody - same
+	# reason sili.gd no longer announces its own tags. Announcing here printed a
+	# line for a channel that finished against a target the server had already
+	# let burn out, or that a closer teammate had already saved.
+	_cancel_rescue_channel()
+
+
+func _cancel_rescue_channel() -> void:
+	var was_channeling := _is_channeling
+	_is_channeling = false
+	if was_channeling and _rescue_target and is_instance_valid(_rescue_target):
+		_send_rescue_progress(_rescue_target, 0.0, 0.0)
+	_rescue_target = null
+	_rescue_timer = 0.0
+	_progress_broadcast_accum = 0.0
+	rescue_progress.emit(0.0)
+
+
+# --- Stealth / hiding places ---
+
+func _update_concealment(delta: float, is_moving: bool) -> void:
+	if is_moving or _current_hiding_spot() == null:
+		_conceal_timer = 0.0
+		is_concealed = false
+		return
+
+	_conceal_timer = min(_conceal_timer + delta, CONCEAL_SETTLE_TIME)
+	is_concealed = _conceal_timer >= CONCEAL_SETTLE_TIME
+
+
+func _current_hiding_spot() -> Node2D:
+	for spot in get_tree().get_nodes_in_group("hiding_spot"):
+		if is_instance_valid(spot) and spot.contains_point(global_position):
+			return spot
+	return null
+
+
+# --- Spotting the Sili ---
+
+func _update_sili_sighting(delta: float) -> void:
+	if _reveal_override_remaining > 0.0:
+		_reveal_override_remaining = maxf(0.0, _reveal_override_remaining - delta)
+
+	_sighting_accum += delta
+	if _sighting_accum < SIGHTING_INTERVAL:
+		return
+	_sighting_accum = 0.0
+
+	var seen := _can_see_sili() or _reveal_override_remaining > 0.0
+	if seen == _last_reported_sighting:
+		return
+	_last_reported_sighting = seen
+	SightingTracker.report_sighting(seen)
+
+
+## Called by reveal_spot.gd on body_entered. A few seconds of "the Sili is
+## visible to your team" that costs nothing to walk into and grants no lasting
+## vision - the whole point is a glimpse, not a spotter drone. Takes the
+## longer of what's left and the new grant rather than stacking, so re-walking
+## through the same zone can't chain into a much longer reveal than intended.
+func trigger_sili_reveal(duration: float) -> void:
+	_reveal_override_remaining = maxf(_reveal_override_remaining, duration)
+
+
+func _can_see_sili() -> bool:
+	var sili := get_tree().get_first_node_in_group("sili")
+	if sili == null or not is_instance_valid(sili):
+		return false
+
+	var camera: Camera2D = get_node_or_null("Camera2D")
+	if camera == null or not camera.enabled:
+		return false
+
+	var view_size: Vector2 = get_viewport_rect().size / camera.zoom
+	var margin: Vector2 = view_size * SIGHTING_MARGIN
+	var view_rect := Rect2(
+		camera.get_screen_center_position() - view_size * 0.5 + margin * 0.5,
+		view_size - margin
+	)
+	return view_rect.has_point(sili.global_position)
+
+
+func _exit_tree() -> void:
+	if not _last_reported_sighting:
+		return
+	_last_reported_sighting = false
+	if is_instance_valid(SightingTracker):
+		SightingTracker.report_sighting(false)
+
+
+## Called by Tunnel.body_entered/body_exited. The Sili has no equivalent, which
+## is exactly how the tunnel stays Tubig-only.
+func set_nearby_tunnel(tunnel: Tunnel) -> void:
+	_nearby_tunnel = tunnel
+
+
+func clear_nearby_tunnel(tunnel: Tunnel) -> void:
+	if _nearby_tunnel == tunnel:
+		_nearby_tunnel = null
+
+
+## Called by Fountain.body_entered/body_exited. The Sili has no equivalent,
+## which is exactly how the fountain stays Tubig-only - same construction as
+## set_nearby_tunnel above.
+func set_nearby_fountain(fountain: Fountain) -> void:
+	_nearby_fountain = fountain
+
+
+func clear_nearby_fountain(fountain: Fountain) -> void:
+	if _nearby_fountain == fountain:
+		_nearby_fountain = null
+
+
+## E now does three different things, so the order it resolves in is a design
+## decision rather than an implementation detail. Highest priority first:
+##
+##   1. RESCUE a burning ally. A tap next to someone who needs pulling out must
+##      never quietly do something else and leave them behind.
+##   2. DRINK from a charged fountain. Deliberately above the tunnel: you had to
+##      walk to the fountain on purpose, and a charge is a shared team resource
+##      that expires when the next speed stage lands. Being teleported away
+##      instead - by a tunnel mouth that happened to overlap - would cost the
+##      whole team the drink, not just you.
+##   3. TAKE THE TUNNEL, the fallback when nothing above applies.
+##
+## Each prompt says which of the three is currently armed, so the priority is
+## visible on screen instead of being something players have to learn by
+## losing a rescue to it.
+func _try_interact() -> void:
+	if _find_burning_ally() != null:
+		return  # rescue is a hold, handled by _handle_rescue_channel
+	if _try_use_fountain():
+		return
+	_try_use_tunnel()
+
+
+## Returns whether the tap was consumed. The answer arrives asynchronously (the
+## server rolls the buff and RPCs it back), but the tap itself is spent either
+## way - otherwise a mistimed press would fall through and burn a tunnel charge
+## on a player who was reaching for a drink.
+func _try_use_fountain() -> bool:
+	if _nearby_fountain == null or not is_instance_valid(_nearby_fountain):
+		return false
+	if not _nearby_fountain.is_charged:
+		return false
+	if multiplayer.has_multiplayer_peer():
+		_nearby_fountain.rpc_id(1, "request_drink")
+	else:
+		_nearby_fountain.request_drink()
+	return true
+
+
+## Applied by Fountain._rpc_apply_buff on the drinker's own machine.
+func grant_tunnel_uses(amount: int) -> void:
+	tunnel_uses_left = mini(TUNNEL_USES_CEILING, tunnel_uses_left + amount)
+
+
+func grant_stamina_buff(duration: float) -> void:
+	_stamina_buff_remaining = maxf(_stamina_buff_remaining, duration)
+
+
+func _try_use_tunnel() -> void:
+	if _tunnel_cooldown > 0.0 or _is_channeling or tunnel_uses_left <= 0:
+		return
+	if _nearby_tunnel == null or not is_instance_valid(_nearby_tunnel):
+		return
+
+	var destination = _nearby_tunnel.exit_position()
+	if destination == null:
+		return
+
+	# Done on our own authority and carried out by MPSync: the tunnel is a fixed
+	# pair of points baked into the level, so there is nothing here for the
+	# server to arbitrate.
+	# Both ends, deliberately: the whole risk of a tunnel is that the Sili can
+	# hear where you went as well as where you left from.
+	AudioManager.play_sfx_at("tunnel", global_position)
+	AudioManager.play_sfx_at("tunnel", destination, -4.0)
+
+	global_position = destination
+	velocity = Vector2.ZERO
+	_tunnel_cooldown = TUNNEL_COOLDOWN
+	tunnel_uses_left -= 1
+	# Concealment means having stayed still and unseen; surfacing somewhere else
+	# across the map is neither.
+	is_concealed = false
+	_conceal_timer = 0.0
+
+
+## Shows the remaining budget rather than just the key, so the choice to spend
+## a trip is made with the count in view. Stays visible when the budget is gone,
+## reading as spent instead of silently disappearing - otherwise a player who
+## walked into a mouth would think the tunnel itself was broken.
+func _update_tunnel_prompt() -> void:
+	var should_show := _nearby_tunnel != null and _tunnel_cooldown <= 0.0
+	if _tunnel_prompt == null:
+		if not should_show:
+			return
+		_tunnel_prompt = Label.new()
+		_tunnel_prompt.name = "TunnelPrompt"
+		_tunnel_prompt.anchor_left = 0.5
+		_tunnel_prompt.anchor_right = 0.5
+		_tunnel_prompt.anchor_top = 1.0
+		_tunnel_prompt.anchor_bottom = 1.0
+		_tunnel_prompt.offset_left = -80.0
+		_tunnel_prompt.offset_right = 80.0
+		_tunnel_prompt.offset_top = -130.0
+		_tunnel_prompt.offset_bottom = -104.0
+		_tunnel_prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		ui_layer.add_child(_tunnel_prompt)
+	_tunnel_prompt.visible = should_show
+	if not should_show:
+		return
+	if tunnel_uses_left > 0:
+		_tunnel_prompt.text = "[E] Tunnel  (%dx)" % tunnel_uses_left
+		_tunnel_prompt.modulate = Color.WHITE
+	else:
+		_tunnel_prompt.text = "Tunnel used up"
+		_tunnel_prompt.modulate = Color(0.65, 0.65, 0.68)
+
+
+## Sits between the tunnel prompt and the rescue prompt, so all three can be on
+## screen at once without overlapping and the stack reads top-to-bottom in the
+## same order E resolves them (see _try_interact).
+##
+## Stays visible when the fountain is empty rather than disappearing, for the
+## same reason the tunnel prompt does: a player standing at a fountain that
+## silently shows nothing concludes the fountain is broken, where "Fountain is
+## empty" tells them to come back after the next speed-up.
+func _update_fountain_prompt() -> void:
+	var near := _nearby_fountain != null and is_instance_valid(_nearby_fountain)
+
+	if _fountain_prompt == null:
+		if not near:
+			return
+		_fountain_prompt = Label.new()
+		_fountain_prompt.name = "FountainPrompt"
+		_fountain_prompt.anchor_left = 0.5
+		_fountain_prompt.anchor_right = 0.5
+		_fountain_prompt.anchor_top = 1.0
+		_fountain_prompt.anchor_bottom = 1.0
+		_fountain_prompt.offset_left = -110.0
+		_fountain_prompt.offset_right = 110.0
+		_fountain_prompt.offset_top = -186.0
+		_fountain_prompt.offset_bottom = -160.0
+		_fountain_prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_fountain_prompt.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		_fountain_prompt.add_theme_constant_override("outline_size", 5)
+		ui_layer.add_child(_fountain_prompt)
+
+	_fountain_prompt.visible = near
+	if not near:
+		return
+	if _nearby_fountain.is_charged:
+		_fountain_prompt.text = "[E] Drink"
+		_fountain_prompt.modulate = Color(0.45, 0.85, 0.95)
+	else:
+		_fountain_prompt.text = "Fountain is empty"
+		_fountain_prompt.modulate = Color(0.65, 0.65, 0.68)
+
+
+## Mirrors the tunnel prompt, above the fountain line so the three never overlap
+## when a burning ally happens to be standing in a tunnel mouth. Says "hold" because
+## rescuing is a channel, not a tap - without that, players tap E once, see
+## nothing happen and assume the rescue is broken.
+func _update_rescue_prompt() -> void:
+	var target := _find_burning_ally()
+	var can_rescue := target != null and MatchManager.rescues_available()
+
+	if _rescue_prompt == null:
+		if not can_rescue:
+			return
+		_rescue_prompt = Label.new()
+		_rescue_prompt.name = "RescuePrompt"
+		_rescue_prompt.anchor_left = 0.5
+		_rescue_prompt.anchor_right = 0.5
+		_rescue_prompt.anchor_top = 1.0
+		_rescue_prompt.anchor_bottom = 1.0
+		_rescue_prompt.offset_left = -110.0
+		_rescue_prompt.offset_right = 110.0
+		_rescue_prompt.offset_top = -214.0
+		_rescue_prompt.offset_bottom = -188.0
+		_rescue_prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_rescue_prompt.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+		_rescue_prompt.add_theme_constant_override("outline_size", 5)
+		ui_layer.add_child(_rescue_prompt)
+
+	_rescue_prompt.visible = can_rescue
+	if not can_rescue:
+		return
+	if _is_channeling:
+		_rescue_prompt.text = "Rescuing... keep holding [E]"
+		_rescue_prompt.modulate = Color(0.52, 0.88, 0.62)
+	else:
+		_rescue_prompt.text = "Hold [E] to rescue"
+		_rescue_prompt.modulate = Color.WHITE
+
+
+func _own_name() -> String:
+	return _name_of(self)
+
+
+func _name_of(character: Node) -> String:
+	if character == null:
+		return "a Tubig"
+	var peer_id := character.get_multiplayer_authority()
+	return NetworkManager.players.get(peer_id, "Tubig")
+
+
+func _find_burning_ally() -> Node2D:
+	var closest: Node2D = null
+	var closest_dist := INF
+	for body in interaction_area.get_overlapping_bodies():
+		if body == self or not body.is_in_group("tubig"):
+			continue
+		var body_heat: HeatStatus = body.get_node_or_null("HeatStatus")
+		if body_heat and body_heat.is_burning():
+			var dist := global_position.distance_squared_to(body.global_position)
+			if dist < closest_dist:
+				closest_dist = dist
+				closest = body
+	return closest
+
+
+# --- Stamina ---
+
+func _update_stamina(delta: float, is_running: bool) -> void:
+	var previous_stamina := stamina
+
+	var buffed := _stamina_buff_remaining > 0.0
+	var drain := STAMINA_DRAIN_RATE * (STAMINA_BUFF_DRAIN_SCALE if buffed else 1.0)
+	var regen := STAMINA_REGEN_RATE * (STAMINA_BUFF_REGEN_SCALE if buffed else 1.0)
+
+	if is_running:
+		stamina = max(0.0, stamina - drain * delta)
+		if stamina == 0.0 and not is_exhausted:
+			_enter_exhaustion()
+	else:
+		stamina = min(MAX_STAMINA, stamina + regen * delta)
+
+	if is_exhausted:
+		_exhaustion_timer -= delta
+		if _exhaustion_timer <= 0.0:
+			_exit_exhaustion()
+
+	if stamina != previous_stamina:
+		stamina_changed.emit(stamina, MAX_STAMINA)
+
+
+func _enter_exhaustion() -> void:
+	is_exhausted = true
+	_exhaustion_timer = EXHAUSTION_DURATION
+	exhausted.emit()
+
+
+func _exit_exhaustion() -> void:
+	is_exhausted = false
+	_exhaustion_timer = 0.0
+	recovered_from_exhaustion.emit()
+
+
+func _on_stamina_changed(current_stamina: float, max_stamina: float) -> void:
+	stamina_bar.value = current_stamina
+
+
+func _on_lives_changed(new_lives_left: int) -> void:
+	_update_hearts(new_lives_left)
+
+
+## One heart per life remaining. No separate "tagged" shading any more - the
+## tag now actually removes a heart, so showing both would double-count it.
+func _update_hearts(lives_remaining: int) -> void:
+	for i in hearts.size():
+		hearts[i].modulate = Color.WHITE if i < lives_remaining else HEART_SPENT_COLOR
+
+
+## Runs on EVERY peer, because HeatStatus.state is replicated - which is what
+## makes these audible to bystanders and not just to the person it happened to.
+func _on_heat_state_changed(new_state: HeatStatus.State) -> void:
+	# collision_shape used to be disabled here so a rooted, incapacitated body
+	# couldn't be shoved around by anyone walking into it. That's now handled
+	# by the player collision_layer/mask split (player bodies are layer 2,
+	# masked to only collide with the world on layer 1, so they never push
+	# each other regardless of state) - see sili.tscn/tubig.tscn.
+	#
+	# Disabling this shape here ALSO removed the body from every Area2D
+	# overlap check, since it's the only CollisionShape2D on the character:
+	# a burning ally became invisible to a rescuer's InteractionArea
+	# (_find_burning_ally's get_overlapping_bodies()), so rescue silently
+	# stopped triggering the moment someone got tagged. Leaving it enabled
+	# keeps the body detectable while state already prevents anything from
+	# physically pushing it.
+	# Leaving BURNING in either direction ends every channel on this body at
+	# once. Rescuers each report their own 0.0 as they notice, but that takes a
+	# tick and the unreliable channel may drop it; clearing here means the bar
+	# never outlives the burn it was counting down.
+	if new_state != HeatStatus.State.BURNING:
+		_rescuers.clear()
+		_refresh_rescue_indicator()
+
+	if new_state == HeatStatus.State.BURNING:
+		animated_sprite.play("heat_" + last_direction)
+		AudioManager.play_sfx_at("sili-tag", global_position)
+	elif new_state == HeatStatus.State.DEAD:
+		AudioManager.play_sfx_at("eliminated", global_position)
+		# Colour only, alpha untouched - see _on_match_ended's DOWNED_TINT note
+		# just below on why concealment's alpha has to stay this function's own.
+		animated_sprite.modulate = Color(DEAD_TINT.r, DEAD_TINT.g, DEAD_TINT.b,
+			animated_sprite.modulate.a)
+	elif new_state == HeatStatus.State.NORMAL:
+		AudioManager.play_sfx_at("tubig_rescue", global_position)
+
+
+## Runs on every peer, same reasoning as _on_heat_state_changed above - the
+## whistle is one moment everyone sees at once, not just the person it happened
+## to. Only tints someone still BURNING when time runs out; a Tubig who made
+## it to the buzzer NORMAL keeps their normal colour, and a Tubig who already
+## died keeps DEAD_TINT rather than being flattened to the plainer downed grey.
+##
+## Sets colour only, not alpha - _on_concealment_changed already owns alpha for
+## the local player, and stomping it here would un-hide a concealed Tubig the
+## instant the match ends.
+func _on_match_ended(_sili_won: bool) -> void:
+	if heat_status.is_burning():
+		animated_sprite.modulate = Color(DOWNED_TINT.r, DOWNED_TINT.g, DOWNED_TINT.b,
+			animated_sprite.modulate.a)
+
+
+func _play_heat_animation() -> void:
+	var anim := "heat_" + last_direction
+	if heat_status.is_dead():
+		if animated_sprite.animation != anim:
+			animated_sprite.play(anim)
+		animated_sprite.pause()
+	elif animated_sprite.animation != anim or not animated_sprite.is_playing():
+		animated_sprite.play(anim)
+
+
+## Progress of every teammate currently channeling on THIS body, keyed by the
+## rescuer's peer id -> [progress, seconds_left, ticks_msec of last report].
+##
+## Two Tubigs can hold E on the same downed player at once, and each one
+## reports its own timer here every 0.1s. This used to write whichever report
+## arrived last straight onto the bar, so with two rescuers it swung between two
+## different timers - and a rescuer stepping away reported 0.0, which blanked
+## the bar for the teammate still channeling. Nobody's rescue was actually
+## restarting: each rescuer's timer is its own and never touched the other's.
+## The DISPLAY restarted, and a player who sees their bar drop to zero lets go
+## of E, which is what turns a cosmetic glitch into a real restart.
+var _rescuers: Dictionary = {}
+
+## Reports come every 0.1s; a rescuer silent for this long has stopped without
+## managing to say so - tagged mid-channel, or dropped off the network.
+const RESCUER_STALE_MSEC := 400
+
+
+@rpc("any_peer", "call_local", "unreliable")
+func show_rescue_progress(progress: float, seconds_left: float) -> void:
+	# get_remote_sender_id is only meaningful inside an RPC. call_local hands
+	# the sender's own machine 0, and an offline test has no peer at all - both
+	# fall back to "this machine".
+	var sender := multiplayer.get_remote_sender_id()
+	if sender == 0:
+		sender = multiplayer.get_unique_id() if multiplayer.has_multiplayer_peer() else 1
+	_report_rescue_progress(sender, progress, seconds_left)
+	_refresh_rescue_indicator()
+
+
+## Bookkeeping only - no UI. Split from the RPC for two reasons: the RPC can
+## only learn who sent it from the network, which leaves a test no way to stand
+## in two rescuers; and keeping the bar out of here lets the logic be exercised
+## on a body whose @onready nodes have not been built. A report of 0.0 is a
+## rescuer letting go, and drops them.
+func _report_rescue_progress(sender: int, progress: float, seconds_left: float) -> void:
+	if progress <= 0.0:
+		_rescuers.erase(sender)
+	else:
+		_rescuers[sender] = [progress, seconds_left, Time.get_ticks_msec()]
+
+
+## The rescuer who is furthest along, as [progress, seconds_left] - or [0, 0]
+## when nobody is channeling. Only that one matters to the downed player: it is
+## how long until they are back on their feet, and it can only move forward or
+## vanish, never lurch backwards because a second teammate arrived late.
+## Prunes anyone who has gone quiet on the way past.
+func _best_rescue_progress() -> Array:
+	var now := Time.get_ticks_msec()
+	var best_progress := 0.0
+	var best_seconds := 0.0
+	for peer_id in _rescuers.keys():
+		var entry: Array = _rescuers[peer_id]
+		if now - int(entry[2]) > RESCUER_STALE_MSEC:
+			_rescuers.erase(peer_id)
+			continue
+		if float(entry[0]) > best_progress:
+			best_progress = float(entry[0])
+			best_seconds = float(entry[1])
+	return [best_progress, best_seconds]
+
+
+func _refresh_rescue_indicator() -> void:
+	var best := _best_rescue_progress()
+	rescue_indicator.visible = best[0] > 0.0
+	rescue_indicator.value = best[0] * 100.0
+	rescue_indicator_label.text = str(int(ceil(best[1])))
+
+
+func get_direction_suffix(dir: Vector2) -> String:
+	var angle = dir.angle()
+
+	if angle >= 3*PI/8 and angle < 5*PI/8:
+		return "s"
+	elif angle >= -5*PI/8 and angle < -3*PI/8:
+		return "n"
+	elif (angle >= PI/8 and angle < 3*PI/8) or (angle >= 5*PI/8 and angle < 7*PI/8):
+		return "se"
+	elif (angle >= -3*PI/8 and angle < -PI/8) or (angle >= -7*PI/8 and angle < -5*PI/8):
+		return "ne"
+	else:
+		return "e"

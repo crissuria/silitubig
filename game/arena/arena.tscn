@@ -1,0 +1,353 @@
+[gd_scene format=3 uid="uid://bvb8sstpgl80d"]
+
+[ext_resource type="Script" uid="uid://uq3omdhc1jx3" path="res://game/arena/arena.gd" id="1_kdgho"]
+[ext_resource type="Script" uid="uid://bvyqnwddex64m" path="res://ui/hud/threat_vignette.gd" id="3_ksk8y"]
+[ext_resource type="Script" uid="uid://b4m220i2h3itl" path="res://ui/hud/event_feed.gd" id="4_jhjpt"]
+[ext_resource type="Script" uid="uid://c86sx7jg5nox1" path="res://ui/hud/minimap.gd" id="5_jqwhr"]
+[ext_resource type="FontFile" uid="uid://dt8i0axtwshee" path="res://game/assets/fonts/BoldPixels.ttf" id="5_ltahe"]
+[ext_resource type="Script" uid="uid://l0nvnaj46rxs" path="res://ui/hud/pregame_reveal.gd" id="7_qk5vs"]
+[ext_resource type="Script" uid="uid://bwr4vw5c3gkki" path="res://ui/hud/match_result.gd" id="8_ytb83"]
+[ext_resource type="Script" uid="uid://cp1gk53ttm381" path="res://ui/leaderboard/leaderboard_panel.gd" id="9_lboard"]
+
+[sub_resource type="CompressedTexture2D" id="CompressedTexture2D_elpcd"]
+load_path = "res://.godot/imported/settings.png-088b7f166c146c7f20ff762069b60d67.ctex"
+
+[node name="MultiplayerArena" type="Node2D" unique_id=1328311220]
+script = ExtResource("1_kdgho")
+
+[node name="MapHolder" type="Node2D" parent="." unique_id=1074302611]
+
+[node name="SiliSpawner" type="MultiplayerSpawner" parent="." unique_id=162836291]
+spawn_path = NodePath("../SiliContainer")
+
+[node name="TubigSpawner" type="MultiplayerSpawner" parent="." unique_id=162836292]
+spawn_path = NodePath("../TubigContainer")
+
+[node name="ThreatLayer" type="CanvasLayer" parent="." unique_id=948141855]
+layer = 9
+
+[node name="ThreatVignette" type="Control" parent="ThreatLayer" unique_id=52040338]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("3_ksk8y")
+metadata/_edit_use_anchors_ = true
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=882817203]
+layer = 10
+
+[node name="EventFeed" type="VBoxContainer" parent="HUD" unique_id=1443001900]
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -430.0
+offset_top = -240.0
+offset_right = -16.0
+offset_bottom = -80.0
+grow_horizontal = 0
+grow_vertical = 0
+mouse_filter = 2
+script = ExtResource("4_jhjpt")
+
+[node name="Minimap" type="Control" parent="HUD" unique_id=1432731096]
+layout_mode = 3
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -196.0
+offset_top = 15.0
+offset_right = -16.0
+offset_bottom = 155.0
+grow_horizontal = 0
+mouse_filter = 2
+script = ExtResource("5_jqwhr")
+
+[node name="TeamPanel" type="VBoxContainer" parent="HUD" unique_id=886074803]
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 200.0
+offset_bottom = 140.0
+theme_override_constants/separation = 6
+metadata/_edit_use_anchors_ = true
+
+[node name="MatchLabel" type="Label" parent="HUD" unique_id=840059440]
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -150.0
+offset_top = 12.0
+offset_right = 150.0
+offset_bottom = 76.0
+theme_override_colors/font_outline_color = Color(0, 0, 0, 0.85)
+theme_override_constants/outline_size = 6
+theme_override_font_sizes/font_size = 44
+text = "00:00"
+horizontal_alignment = 1
+metadata/_edit_use_anchors_ = true
+
+[node name="AnnouncementLabel" type="Label" parent="HUD" unique_id=840059441]
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -220.0
+offset_top = 80.0
+offset_right = 220.0
+offset_bottom = 108.0
+theme_override_colors/font_color = Color(1, 0.82, 0.36, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 0.85)
+theme_override_constants/outline_size = 5
+theme_override_font_sizes/font_size = 18
+horizontal_alignment = 1
+metadata/_edit_use_anchors_ = true
+
+[node name="SettingsButton" type="Button" parent="HUD" unique_id=1383247187]
+anchors_preset = -1
+anchor_left = 0.9921875
+anchor_top = -0.024691358
+anchor_right = 1.0130209
+anchor_bottom = 0.012345679
+offset_left = -247.0
+offset_top = 8.0
+offset_right = -207.0
+offset_bottom = 48.0
+grow_horizontal = 0
+tooltip_text = "Settings"
+icon = SubResource("CompressedTexture2D_elpcd")
+flat = true
+icon_alignment = 1
+expand_icon = true
+metadata/_edit_use_anchors_ = true
+
+[node name="GuideButton" type="Button" parent="HUD" unique_id=1383247189]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -304.0
+offset_top = -6.0
+offset_right = -240.0
+offset_bottom = 58.0
+grow_horizontal = 0
+tooltip_text = "Controls guide  (F1 / H)"
+theme_override_colors/font_color = Color(0.43529412, 0.43529412, 0.4862745, 1)
+theme_override_colors/font_focus_color = Color(1, 0.92, 0.62, 1)
+theme_override_colors/font_pressed_color = Color(0.43529412, 0.43529412, 0.4862745, 1)
+theme_override_colors/font_hover_color = Color(0.43529412, 0.43529412, 0.4862745, 1)
+theme_override_colors/font_hover_pressed_color = Color(0.43529412, 0.43529412, 0.4862745, 1)
+theme_override_colors/font_outline_color = Color(1, 1, 1, 1)
+theme_override_constants/outline_size = 7
+theme_override_font_sizes/font_size = 40
+text = "?"
+flat = true
+
+[node name="GuidePanel" type="PanelContainer" parent="HUD" unique_id=1383247199]
+visible = false
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = -186.0
+offset_right = 460.0
+offset_bottom = -16.0
+grow_vertical = 0
+mouse_filter = 1
+
+[node name="Margin" type="MarginContainer" parent="HUD/GuidePanel" unique_id=1383247200]
+layout_mode = 2
+theme_override_constants/margin_left = 14
+theme_override_constants/margin_top = 10
+theme_override_constants/margin_right = 14
+theme_override_constants/margin_bottom = 10
+
+[node name="VBox" type="VBoxContainer" parent="HUD/GuidePanel/Margin" unique_id=1383247201]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="Title" type="Label" parent="HUD/GuidePanel/Margin/VBox" unique_id=1383247202]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Controls"
+horizontal_alignment = 1
+
+[node name="Body" type="Label" parent="HUD/GuidePanel/Margin/VBox" unique_id=1383247203]
+layout_mode = 2
+theme_override_font_sizes/font_size = 15
+text = "Move - WASD or Arrow Keys
+Sprint - hold Shift
+E - hold to rescue an ally, tap to drink or take a tunnel
+Settings - gear icon, top right
+
+[F1] or [H] to close this guide"
+autowrap_mode = 3
+
+[node name="SettingsPopup" type="PanelContainer" parent="HUD" unique_id=1706362567]
+visible = false
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -160.0
+offset_top = -116.0
+offset_right = 160.0
+offset_bottom = 116.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="HUD/SettingsPopup" unique_id=653669866]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="HUD/SettingsPopup/VBox" unique_id=733704253]
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+text = "Settings"
+horizontal_alignment = 1
+
+[node name="MasterRow" type="HBoxContainer" parent="HUD/SettingsPopup/VBox" unique_id=1385089131]
+layout_mode = 2
+
+[node name="MasterLabel" type="Label" parent="HUD/SettingsPopup/VBox/MasterRow" unique_id=640123771]
+custom_minimum_size = Vector2(80, 0)
+layout_mode = 2
+theme_override_fonts/font = ExtResource("5_ltahe")
+theme_override_font_sizes/font_size = 21
+text = "Master"
+
+[node name="MasterSlider" type="HSlider" parent="HUD/SettingsPopup/VBox/MasterRow" unique_id=147394768]
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 1.0
+step = 0.01
+value = 1.0
+
+[node name="MasterValue" type="Label" parent="HUD/SettingsPopup/VBox/MasterRow" unique_id=1505308164]
+custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+theme_override_fonts/font = ExtResource("5_ltahe")
+theme_override_font_sizes/font_size = 18
+text = "100%"
+horizontal_alignment = 2
+
+[node name="MusicRow" type="HBoxContainer" parent="HUD/SettingsPopup/VBox" unique_id=1657277244]
+layout_mode = 2
+
+[node name="MusicLabel" type="Label" parent="HUD/SettingsPopup/VBox/MusicRow" unique_id=1134282723]
+custom_minimum_size = Vector2(80, 0)
+layout_mode = 2
+theme_override_fonts/font = ExtResource("5_ltahe")
+theme_override_font_sizes/font_size = 21
+text = "Music"
+
+[node name="MusicSlider" type="HSlider" parent="HUD/SettingsPopup/VBox/MusicRow" unique_id=393823608]
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 1.0
+step = 0.01
+value = 1.0
+
+[node name="MusicValue" type="Label" parent="HUD/SettingsPopup/VBox/MusicRow" unique_id=1888050296]
+custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+theme_override_fonts/font = ExtResource("5_ltahe")
+theme_override_font_sizes/font_size = 18
+text = "100%"
+horizontal_alignment = 2
+
+[node name="SFXRow" type="HBoxContainer" parent="HUD/SettingsPopup/VBox" unique_id=1375624546]
+layout_mode = 2
+
+[node name="SFXLabel" type="Label" parent="HUD/SettingsPopup/VBox/SFXRow" unique_id=723883044]
+custom_minimum_size = Vector2(80, 0)
+layout_mode = 2
+theme_override_fonts/font = ExtResource("5_ltahe")
+theme_override_font_sizes/font_size = 21
+text = "SFX"
+
+[node name="SFXSlider" type="HSlider" parent="HUD/SettingsPopup/VBox/SFXRow" unique_id=1227726118]
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 1.0
+step = 0.01
+value = 1.0
+
+[node name="SFXValue" type="Label" parent="HUD/SettingsPopup/VBox/SFXRow" unique_id=1968453650]
+custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+theme_override_fonts/font = ExtResource("5_ltahe")
+theme_override_font_sizes/font_size = 18
+text = "100%"
+horizontal_alignment = 2
+
+[node name="AmbienceRow" type="HBoxContainer" parent="HUD/SettingsPopup/VBox" unique_id=1048015341]
+layout_mode = 2
+
+[node name="AmbienceLabel" type="Label" parent="HUD/SettingsPopup/VBox/AmbienceRow" unique_id=1656887983]
+custom_minimum_size = Vector2(80, 0)
+layout_mode = 2
+theme_override_fonts/font = ExtResource("5_ltahe")
+theme_override_font_sizes/font_size = 21
+text = "Ambience"
+
+[node name="AmbienceSlider" type="HSlider" parent="HUD/SettingsPopup/VBox/AmbienceRow" unique_id=8352216]
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 1.0
+step = 0.01
+value = 1.0
+
+[node name="AmbienceValue" type="Label" parent="HUD/SettingsPopup/VBox/AmbienceRow" unique_id=1369508425]
+custom_minimum_size = Vector2(52, 0)
+layout_mode = 2
+theme_override_fonts/font = ExtResource("5_ltahe")
+theme_override_font_sizes/font_size = 18
+text = "100%"
+horizontal_alignment = 2
+
+[node name="LeaveGameButton" type="Button" parent="HUD/SettingsPopup/VBox" unique_id=1116732310]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.94, 0.62, 0.58, 1)
+text = "Leave Game"
+
+[node name="CloseButton" type="Button" parent="HUD/SettingsPopup/VBox" unique_id=1116732302]
+layout_mode = 2
+text = "Close"
+
+[node name="PregameLayer" type="CanvasLayer" parent="." unique_id=2091916670]
+layer = 20
+
+[node name="PregameReveal" type="Control" parent="PregameLayer" unique_id=1243961410]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("7_qk5vs")
+metadata/_edit_use_anchors_ = true
+
+[node name="ResultLayer" type="CanvasLayer" parent="." unique_id=2091916671]
+layer = 30
+
+[node name="MatchResult" type="Control" parent="ResultLayer" unique_id=1243961411]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("8_ytb83")
+
+[node name="LeaderboardPanel" type="Control" parent="ResultLayer" unique_id=1243961412]
+layout_mode = 3
+anchors_preset = 0
+script = ExtResource("9_lboard")
+
+[node name="SiliContainer" type="Node2D" parent="." unique_id=327789985]
+
+[node name="TubigContainer" type="Node2D" parent="." unique_id=327789986]
